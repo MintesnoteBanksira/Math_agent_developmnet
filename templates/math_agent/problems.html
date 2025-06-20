@@ -14,6 +14,9 @@
         <div class="btn-group">
             <a href="{% url 'math_agent:batch_list' %}" class="btn btn-outline-secondary">Back to Batches</a>
             <a href="{% url 'math_agent:generate' %}" class="btn btn-primary">Generate New Batch</a>
+            {% if batch_id %}
+            <a href="{% url 'math_agent:export_problems' %}?batch_id={{ batch_id }}" class="btn btn-success">Export as CSV</a>
+            {% endif %}
         </div>
     </div>
 </div>

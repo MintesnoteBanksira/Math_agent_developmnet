@@ -15,7 +15,7 @@ def check_problem(question, answer, hints, pipeline_config):
             Example: {"provider": "openai", "model": "o3-mini"}
         
     Returns:
-        tuple: (is_valid, rejection_reason, corrected_hints)
+        tuple: (is_valid, rejection_reason, corrected_hints, cost)
     """
     try:
         # Prepare the input for the model
@@ -30,14 +30,14 @@ def check_problem(question, answer, hints, pipeline_config):
             {"role": "user", "content": json.dumps(input_data)}
         ]
         
-        data = call_llm(pipeline_config, messages)
+        data, cost = call_llm(pipeline_config, messages)
         
         # Extract validation result
         is_valid = data.get('valid', False)
         reason = data.get('reason', '')
         corrected_hints = data.get('corrected_hints', {})
         
-        return is_valid, reason, corrected_hints
+        return is_valid, reason, corrected_hints, cost
         
     except Exception as e:
         raise Exception(f"Error checking problem: {str(e)}") 

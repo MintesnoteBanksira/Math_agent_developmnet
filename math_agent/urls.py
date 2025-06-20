@@ -10,4 +10,5 @@ urlpatterns = [
     path('batch/<int:batch_id>/problems/', views.ProblemListView.as_view(), name='problems'),
     path('problem/<int:pk>/', views.ProblemDetailView.as_view(), name='problem_detail'),
     path('problems/', views.AllProblemsView.as_view(), name='all_problems'),
+    path('export/problems/', views.export_problems_csv, name='export_problems'),
 ] 

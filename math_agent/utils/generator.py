@@ -14,7 +14,7 @@ def generate_problem(pipeline_config, taxonomy=None):
         taxonomy (dict, optional): Dictionary containing subject and topic
         
     Returns:
-        tuple: (question, answer, hints, embedding, similar_problems)
+        tuple: (question, answer, hints, embedding, similar_problems, cost)
     """
     try:
         # Prepare the prompt based on taxonomy
@@ -30,7 +30,7 @@ def generate_problem(pipeline_config, taxonomy=None):
         ]
         
         # Call the model using our centralized client
-        data = call_llm(pipeline_config, messages)
+        data, cost = call_llm(pipeline_config, messages)
         
         # Extract question, answer, and hints
         question = data.get('problem', '')
@@ -43,7 +43,7 @@ def generate_problem(pipeline_config, taxonomy=None):
         # Similarity check
         similar_problems, embedding = find_similar_problems(question)
         
-        return question, answer, hints, embedding, similar_problems
+        return question, answer, hints, embedding, similar_problems, cost
         
     except Exception as e:
         raise Exception(f"Error generating problem: {str(e)}") 

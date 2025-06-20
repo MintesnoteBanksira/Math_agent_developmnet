@@ -8,6 +8,7 @@ class Batch(models.Model):
     taxonomy_json = models.JSONField()
     pipeline = models.JSONField()  # Dictionary of dictionaries for generator, hinter, checker, target, judge
     number_of_valid_needed = models.IntegerField(validators=[MinValueValidator(1)])
+    batch_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0.00)  # Track total batch cost
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -36,6 +37,7 @@ class Problem(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     problem_embedding = models.JSONField(null=True, blank=True)
     similar_problems = models.JSONField(default=dict, blank=True)
+    cost = models.DecimalField(max_digits=10, decimal_places=6, default=0.00)  # Track cost up to 6 decimal places
 
     def __str__(self):
         return f"{self.subject} - {self.topic} - {self.status}"

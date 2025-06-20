@@ -14,7 +14,7 @@ def judge_solution(target_solution, true_answer, pipeline_config):
             Example: {"provider": "openai", "model": "o3-mini"}
         
     Returns:
-        bool: True if the solution is correct, False otherwise
+        tuple: (is_valid, cost)
     """
     try:
         # Prepare the input for the model
@@ -28,7 +28,7 @@ def judge_solution(target_solution, true_answer, pipeline_config):
             {"role": "user", "content": json.dumps(input_data)}
         ]
         
-        data = call_llm(pipeline_config, messages)
+        data, cost = call_llm(pipeline_config, messages)
         
         # Extract validation result
         is_valid = data.get('valid', False)
@@ -37,7 +37,7 @@ def judge_solution(target_solution, true_answer, pipeline_config):
         if reason:
             print(f"Judge reason: {reason}")
             
-        return is_valid
+        return is_valid, cost
         
     except Exception as e:
         raise Exception(f"Error judging solution: {str(e)}") 

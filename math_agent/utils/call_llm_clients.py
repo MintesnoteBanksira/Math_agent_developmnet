@@ -3,6 +3,7 @@ import google.generativeai as genai
 from django.conf import settings
 import json
 import re
+from .LLM_cost import calculate_cost
 
 def safe_json_parse(raw_text):
     """Parse JSON from model response, handling common formatting issues."""
@@ -34,7 +35,9 @@ def call_llm(pipeline_config, messages):
         messages (list): List of message dictionaries with 'role' and 'content'
         
     Returns:
-        dict: The parsed JSON response from the model
+        tuple: (parsed_response, cost)
+            - parsed_response (dict): The parsed JSON response from the model
+            - cost (float): The calculated cost for this API call
     """
     try:
         provider = pipeline_config['provider'].lower()
@@ -48,6 +51,8 @@ def call_llm(pipeline_config, messages):
                 temperature=1.0
             )
             raw_response = response.choices[0].message.content.strip()
+            input_tokens = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
             
         elif provider == 'google':
             genai.configure(api_key=settings.GOOGLE_API_KEY)
@@ -56,12 +61,22 @@ def call_llm(pipeline_config, messages):
             prompt = "\n".join([msg["content"] for msg in messages])
             response = model_instance.generate_content(prompt)
             raw_response = response.text.strip()
+            input_tokens = response.prompt_token_count
+            output_tokens = response.candidates[0].token_count
             
         else:
             raise ValueError(f"Unsupported provider: {provider}")
         
-        # Parse the response through safe_json_parse
-        return safe_json_parse(raw_response)
+        # Calculate cost using LLM_cost utility
+        cost = calculate_cost(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens
+        )
+        
+        # Parse and return both response and cost
+        return safe_json_parse(raw_response), cost
             
     except Exception as e:
         raise Exception(f"Error calling LLM: {str(e)}")
@@ -78,13 +93,15 @@ if __name__ == "__main__":
     try:
         # OpenAI call
         openai_config = {"provider": "openai", "model": "o3-mini"}
-        openai_response = call_llm(openai_config, messages)
-        print("OpenAI Response:", openai_response)
+        response, cost = call_llm(openai_config, messages)
+        print("OpenAI Response:", response)
+        print("Cost: $", cost)
         
         # Google call
-        google_config = {"provider": "google", "model": "gemini-2.5-pro-preview-06-05"}
-        google_response = call_llm(google_config, messages)
-        print("Google Response:", google_response)
+        google_config = {"provider": "google", "model": "gemini-2.5-pro"}
+        response, cost = call_llm(google_config, messages)
+        print("Google Response:", response)
+        print("Cost: $", cost)
         
     except Exception as e:
         print(f"Error: {str(e)}") 

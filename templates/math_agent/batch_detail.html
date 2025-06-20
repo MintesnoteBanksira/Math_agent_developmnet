@@ -19,6 +19,20 @@
             <small class="text-muted">Created: {{ batch.created_at|date:"F j, Y, g:i a" }}</small>
         </p>
         
+        <h6 class="mt-4">Cost Information</h6>
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <p><strong>Total Batch Cost:</strong> ${{ batch.batch_cost|floatformat:6 }}</p>
+            </div>
+            <div class="col-md-6">
+                {% if stats.valid > 0 %}
+                    <p><strong>Average Cost per Valid Problem:</strong> ${{ cost_per_problem|floatformat:6 }}</p>
+                {% else %}
+                    <p><strong>Average Cost per Valid Problem:</strong> N/A (no valid problems)</p>
+                {% endif %}
+            </div>
+        </div>
+        
         <h6 class="mt-4">Statistics</h6>
         <div class="row text-center">
             <div class="col">

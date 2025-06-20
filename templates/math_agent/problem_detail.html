@@ -31,6 +31,7 @@
                                 {{ problem.status|title }}
                             </span>
                         </p>
+                        <p><strong>Cost:</strong> ${{ problem.cost|floatformat:6 }}</p>
                     </div>
                     <div class="col-md-6">
                         <p><strong>Batch:</strong> {{ problem.batch.name }}</p>

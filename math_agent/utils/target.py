@@ -13,7 +13,7 @@ def test_with_target(question, pipeline_config):
             Example: {"provider": "openai", "model": "o3-mini"}
         
     Returns:
-        str: The model's solution attempt
+        tuple: (answer, cost)
     """
     try:
         # Prepare the input for the model
@@ -26,15 +26,36 @@ def test_with_target(question, pipeline_config):
             {"role": "user", "content": json.dumps(input_data)}
         ]
         
-        data = call_llm(pipeline_config, messages)
+        data, cost = call_llm(pipeline_config, messages)
         
-        # Extract the answer from the JSON response
-        answer = data.get('answer', '')
+        # Handle different response formats
+        answer = None
+        
+        # Try to extract answer from JSON response
+        if isinstance(data, dict):
+            answer = data.get('answer', '')
+        elif isinstance(data, str):
+            # If the response is a string, try to parse it as JSON
+            try:
+                parsed_data = json.loads(data)
+                if isinstance(parsed_data, dict):
+                    answer = parsed_data.get('answer', '')
+                else:
+                    answer = str(parsed_data)
+            except json.JSONDecodeError:
+                # If it's not JSON, treat the entire response as the answer
+                answer = data
+        else:
+            # For any other type, convert to string
+            answer = str(data)
         
         if not answer:
-            raise ValueError("Invalid response: missing answer field")
+            raise ValueError("Invalid response: missing or empty answer")
         
-        return answer.strip()
+        # Ensure answer is a string and strip whitespace
+        answer = str(answer).strip()
+        
+        return answer, cost
         
     except Exception as e:
         raise Exception(f"Error testing with target model: {str(e)}") 
