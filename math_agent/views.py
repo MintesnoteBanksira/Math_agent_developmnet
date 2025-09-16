@@ -2,6 +2,7 @@ from django.shortcuts import render, get_object_or_404
 from django.views import View
 from django.views.generic import ListView, DetailView
 from django.http import JsonResponse, HttpResponse
+from django.db import transaction
 from .models import Batch, Problem
 from .utils.generator import generate_problem
 from .utils.hinter import generate_hints
@@ -12,9 +13,194 @@ from datetime import datetime
 import json
 import random
 import csv
+import threading
+import queue
+import time
 from .utils.similarity_utils import SIMILARITY_THRESHOLD
 
 # Create your views here.
+
+def problem_generation_worker(worker_id, task_queue, result_queue, pipeline, taxonomy_file, batch_id, stats_lock, stats):
+    """
+    Worker function for generating problems in parallel.
+    
+    Args:
+        worker_id: Unique identifier for this worker
+        task_queue: Queue containing generation tasks
+        result_queue: Queue to put completed problems
+        pipeline: Pipeline configuration
+        taxonomy_file: Taxonomy data for subject/topic selection
+        batch_id: Batch ID for database operations
+        stats_lock: Thread lock for shared statistics
+        stats: Shared statistics dictionary
+    """
+    while True:
+        try:
+            # Get task from queue (blocking with timeout)
+            task = task_queue.get(timeout=1)
+            if task is None:  # Shutdown signal
+                break
+                
+            attempt_id = task['attempt_id']
+            print(f"\n[Worker {worker_id}] Starting attempt {attempt_id}")
+            print("=" * 50)
+            
+            problem_cost = 0.0
+            
+            try:
+                # Randomly select subject and topic from taxonomy
+                subject = random.choice(list(taxonomy_file.keys()))
+                topic = random.choice(taxonomy_file[subject])
+                
+                # Create taxonomy dict for generator
+                taxonomy = {
+                    "subject": subject,
+                    "topic": topic
+                }
+                
+                # Generate problem
+                print(f"[Worker {worker_id}] Calling generator for {subject} - {topic}...")
+                question, answer, hints, embedding, similar_problems, generator_cost = generate_problem(pipeline['generator'], taxonomy=taxonomy)
+                problem_cost += generator_cost
+                print(f"[Worker {worker_id}] Generator result:\nQuestion: {question}\nAnswer: {answer}\nCost: ${generator_cost}")
+                
+                # Check problem validity
+                print(f"[Worker {worker_id}] Calling checker...")
+                is_valid, rejection_reason, corrected_hints, checker_cost = check_problem(question, answer, hints, pipeline['checker'])
+                problem_cost += checker_cost
+                print(f"[Worker {worker_id}] Checker result: {'Valid' if is_valid else 'Invalid'}\nCost: ${checker_cost}")
+                
+                if not is_valid:
+                    print(f"[Worker {worker_id}] Rejection reason: {rejection_reason}")
+                    # Create discarded problem with transaction safety
+                    with transaction.atomic():
+                        problem = Problem.objects.create(
+                            subject=subject,
+                            topic=topic,
+                            question=question,
+                            answer=answer,
+                            hints=hints,
+                            rejection_reason=rejection_reason,
+                            status='discarded',
+                            batch_id=batch_id,
+                            problem_embedding=embedding,
+                            similar_problems=similar_problems,
+                            cost=problem_cost
+                        )
+                        
+                        # Update similar problems' similar_problems field
+                        for sim_id, sim_score in similar_problems.items():
+                            try:
+                                sim_prob = Problem.objects.select_for_update().get(id=sim_id)
+                                sim_dict = sim_prob.similar_problems or {}
+                                sim_dict[str(problem.id)] = sim_score
+                                sim_prob.similar_problems = sim_dict
+                                sim_prob.save(update_fields=['similar_problems'])
+                            except Problem.DoesNotExist:
+                                continue
+                    
+                    # Update shared stats
+                    with stats_lock:
+                        stats['discarded'] += 1
+                        stats['total_cost'] += problem_cost
+                        stats['attempts'] += 1
+                    
+                    result_queue.put({
+                        'type': 'discarded',
+                        'problem_id': problem.id,
+                        'cost': problem_cost,
+                        'attempt_id': attempt_id,
+                        'worker_id': worker_id
+                    })
+                    
+                else:
+                    # Use corrected hints if provided
+                    if corrected_hints:
+                        print(f"[Worker {worker_id}] Using corrected hints from checker")
+                        hints = corrected_hints
+
+                    # Test with target
+                    print(f"[Worker {worker_id}] Calling target...")
+                    target_result, target_cost = test_with_target(question, pipeline['target'])
+                    problem_cost += target_cost
+                    print(f"[Worker {worker_id}] Target result:\n{target_result}\nCost: ${target_cost}")
+                    
+                    # Judge the solution
+                    print(f"[Worker {worker_id}] Calling judge...")
+                    is_solved, judge_cost = judge_solution(target_result, answer, pipeline['judge'])
+                    problem_cost += judge_cost
+                    print(f"[Worker {worker_id}] Judge result: {'Solved' if is_solved else 'Not Solved'}\nCost: ${judge_cost}")
+                    
+                    # Create problem with appropriate status and transaction safety
+                    status = 'solved' if is_solved else 'valid'
+                    with transaction.atomic():
+                        problem = Problem.objects.create(
+                            subject=subject,
+                            topic=topic,
+                            question=question,
+                            answer=answer,
+                            hints=hints,
+                            status=status,
+                            batch_id=batch_id,
+                            problem_embedding=embedding,
+                            similar_problems=similar_problems,
+                            cost=problem_cost
+                        )
+                        
+                        # Update similar problems' similar_problems field
+                        for sim_id, sim_score in similar_problems.items():
+                            try:
+                                sim_prob = Problem.objects.select_for_update().get(id=sim_id)
+                                sim_dict = sim_prob.similar_problems or {}
+                                sim_dict[str(problem.id)] = sim_score
+                                sim_prob.similar_problems = sim_dict
+                                sim_prob.save(update_fields=['similar_problems'])
+                            except Problem.DoesNotExist:
+                                continue
+                    
+                    # Update shared stats
+                    with stats_lock:
+                        stats['total_cost'] += problem_cost
+                        stats['attempts'] += 1
+                        if status == 'valid':
+                            stats['valid'] += 1
+                        else:
+                            stats['solved'] += 1
+                    
+                    result_queue.put({
+                        'type': status,
+                        'problem_id': problem.id,
+                        'cost': problem_cost,
+                        'attempt_id': attempt_id,
+                        'worker_id': worker_id
+                    })
+                    
+                    print(f"[Worker {worker_id}] Valid problem count: {stats['valid']}/{stats['target_valid']}")
+                
+            except Exception as e:
+                print(f"[Worker {worker_id}] Error in attempt {attempt_id}: {str(e)}")
+                print(f"[Worker {worker_id}] Skipping this attempt and continuing with next generation...")
+                
+                # Update shared stats
+                with stats_lock:
+                    stats['attempts'] += 1
+                
+                result_queue.put({
+                    'type': 'error',
+                    'error': str(e),
+                    'attempt_id': attempt_id,
+                    'worker_id': worker_id
+                })
+            
+            # Mark task as done
+            task_queue.task_done()
+            
+        except queue.Empty:
+            # Timeout waiting for task, check if we should continue
+            continue
+        except Exception as e:
+            print(f"[Worker {worker_id}] Fatal error: {str(e)}")
+            break
 
 class GenerateView(View):
     def get(self, request):
@@ -35,137 +221,141 @@ class GenerateView(View):
                 number_of_valid_needed=number_of_valid_needed
             )
 
-            valid_count = 0
-            attempt_count = 0
-            batch_cost = 0.0
+            print(f"\n🚀 Starting threaded problem generation with 10 workers")
+            print(f"Target: {number_of_valid_needed} valid problems")
+            print("=" * 60)
+
+            # Threading setup
+            NUM_WORKERS = 10
+            task_queue = queue.Queue()
+            result_queue = queue.Queue()
+            stats_lock = threading.Lock()
             
-            while valid_count < number_of_valid_needed:
-                attempt_count += 1
-                print(f"\nAttempt {attempt_count}")
-                print("=" * 50)
-                
-                # Reset cost for this problem
-                problem_cost = 0.0
-                
+            # Shared statistics
+            stats = {
+                'valid': 0,
+                'solved': 0,
+                'discarded': 0,
+                'attempts': 0,
+                'total_cost': 0.0,
+                'target_valid': number_of_valid_needed,
+                'completed': False
+            }
+            
+            # Start worker threads
+            workers = []
+            for i in range(NUM_WORKERS):
+                worker = threading.Thread(
+                    target=problem_generation_worker,
+                    args=(i + 1, task_queue, result_queue, pipeline, taxonomy_file, batch.id, stats_lock, stats),
+                    daemon=True
+                )
+                worker.start()
+                workers.append(worker)
+                print(f"Started worker {i + 1}")
+            
+            # Add initial tasks to queue (start with 3x the target to ensure we have enough work)
+            initial_tasks = number_of_valid_needed * 3
+            for attempt_id in range(1, initial_tasks + 1):
+                task_queue.put({'attempt_id': attempt_id})
+            
+            print(f"Added {initial_tasks} initial tasks to queue")
+            
+            # Monitor progress and add more tasks as needed
+            last_status_time = time.time()
+            status_interval = 10  # Print status every 10 seconds
+            
+            while stats['valid'] < number_of_valid_needed:
                 try:
-                    # Randomly select subject and topic from taxonomy
-                    subject = random.choice(list(taxonomy_file.keys()))
-                    topic = random.choice(taxonomy_file[subject])
+                    # Check for results
+                    try:
+                        result = result_queue.get(timeout=1)
+                        if result['type'] in ['valid', 'solved', 'discarded']:
+                            print(f"✅ [Worker {result['worker_id']}] Completed {result['type']} problem (Attempt {result['attempt_id']})")
+                        elif result['type'] == 'error':
+                            print(f"❌ [Worker {result['worker_id']}] Error in attempt {result['attempt_id']}: {result['error']}")
+                        
+                        result_queue.task_done()
+                    except queue.Empty:
+                        pass
                     
-                    # Create taxonomy dict for generator
-                    taxonomy = {
-                        "subject": subject,
-                        "topic": topic
-                    }
+                    # Add more tasks if queue is getting low and we haven't reached target
+                    if task_queue.qsize() < 5 and stats['valid'] < number_of_valid_needed:
+                        # Add 10 more tasks
+                        for i in range(10):
+                            task_queue.put({'attempt_id': stats['attempts'] + i + 1})
+                        print(f"Added 10 more tasks to queue (Queue size: {task_queue.qsize()})")
                     
-                    # Generate problem (now includes hints, embedding, similar_problems, cost)
-                    print(f"Calling generator for {subject} - {topic}...")
-                    question, answer, hints, embedding, similar_problems, generator_cost = generate_problem(pipeline['generator'], taxonomy=taxonomy)
-                    problem_cost += generator_cost
-                    print(f"Generator result:\nQuestion: {question}\nAnswer: {answer}\nHints: {json.dumps(hints, indent=2)}\nSimilar: {similar_problems}\nCost: ${generator_cost}")
+                    # Print periodic status
+                    current_time = time.time()
+                    if current_time - last_status_time >= status_interval:
+                        with stats_lock:
+                            print(f"\n📊 Status Update:")
+                            print(f"   Valid: {stats['valid']}/{number_of_valid_needed}")
+                            print(f"   Solved: {stats['solved']}")
+                            print(f"   Discarded: {stats['discarded']}")
+                            print(f"   Total Attempts: {stats['attempts']}")
+                            print(f"   Total Cost: ${stats['total_cost']:.4f}")
+                            print(f"   Queue Size: {task_queue.qsize()}")
+                            print(f"   Active Workers: {sum(1 for w in workers if w.is_alive())}")
+                        last_status_time = current_time
                     
-                    # Check problem validity
-                    print("\nCalling checker...")
-                    is_valid, rejection_reason, corrected_hints, checker_cost = check_problem(question, answer, hints, pipeline['checker'])
-                    problem_cost += checker_cost
-                    print(f"Checker result: {'Valid' if is_valid else 'Invalid'}\nCost: ${checker_cost}")
-                    
-                    if not is_valid:
-                        print(f"Rejection reason: {rejection_reason}")
-                        # Create discarded problem
-                        problem = Problem.objects.create(
-                            subject=subject,
-                            topic=topic,
-                            question=question,
-                            answer=answer,
-                            hints=hints,
-                            rejection_reason=rejection_reason,
-                            status='discarded',
-                            batch=batch,
-                            problem_embedding=embedding,
-                            similar_problems=similar_problems,
-                            cost=problem_cost
-                        )
-                        # Update batch cost
-                        batch_cost += problem_cost
-                        # Update similar problems' similar_problems field
-                        for sim_id, sim_score in similar_problems.items():
-                            try:
-                                sim_prob = Problem.objects.get(id=sim_id)
-                                sim_dict = sim_prob.similar_problems or {}
-                                sim_dict[str(problem.id)] = sim_score
-                                sim_prob.similar_problems = sim_dict
-                                sim_prob.save(update_fields=['similar_problems'])
-                            except Problem.DoesNotExist:
-                                continue
-                        continue
-                    
-                    # Use corrected hints if provided
-                    if corrected_hints:
-                        print("Using corrected hints from checker")
-                        hints = corrected_hints
-
-                    # Test with target
-                    print("\nCalling target...")
-                    target_result, target_cost = test_with_target(question, pipeline['target'])
-                    problem_cost += target_cost
-                    print(f"Target result:\n{target_result}\nCost: ${target_cost}")
-                    
-                    # Judge the solution
-                    print("\nCalling judge...")
-                    is_solved, judge_cost = judge_solution(target_result, answer, pipeline['judge'])
-                    problem_cost += judge_cost
-                    print(f"Judge result: {'Solved' if is_solved else 'Not Solved'}\nCost: ${judge_cost}")
-                    
-                    # Create problem with appropriate status
-                    status = 'solved' if is_solved else 'valid'
-                    problem = Problem.objects.create(
-                        subject=subject,
-                        topic=topic,
-                        question=question,
-                        answer=answer,
-                        hints=hints,
-                        status=status,
-                        batch=batch,
-                        problem_embedding=embedding,
-                        similar_problems=similar_problems,
-                        cost=problem_cost
-                    )
-                    # Update batch cost
-                    batch_cost += problem_cost
-                    # Update similar problems' similar_problems field
-                    for sim_id, sim_score in similar_problems.items():
-                        try:
-                            sim_prob = Problem.objects.get(id=sim_id)
-                            sim_dict = sim_prob.similar_problems or {}
-                            sim_dict[str(problem.id)] = sim_score
-                            sim_prob.similar_problems = sim_dict
-                            sim_prob.save(update_fields=['similar_problems'])
-                        except Problem.DoesNotExist:
-                            continue
-                    
-                    if status == 'valid':
-                        valid_count += 1
-                        print(f"\nValid problem count: {valid_count}/{number_of_valid_needed}")
-                
-                except Exception as e:
-                    print(f"Error in attempt {attempt_count}: {str(e)}")
-                    print("Skipping this attempt and continuing with next generation...")
-                    continue
-
+                    # Safety check - prevent infinite loop
+                    if stats['attempts'] > number_of_valid_needed * 10:  # 10x safety factor
+                        print(f"⚠️  Safety limit reached ({stats['attempts']} attempts). Stopping generation.")
+                        break
+                        
+                except KeyboardInterrupt:
+                    print("\n🛑 Generation interrupted by user")
+                    break
+            
+            # Shutdown workers
+            print("\n🔄 Shutting down workers...")
+            for _ in range(NUM_WORKERS):
+                task_queue.put(None)  # Shutdown signal
+            
+            # Wait for workers to finish
+            for worker in workers:
+                worker.join(timeout=5)
+            
+            # Process any remaining results
+            while not result_queue.empty():
+                try:
+                    result = result_queue.get_nowait()
+                    if result['type'] in ['valid', 'solved', 'discarded']:
+                        print(f"✅ Final result: {result['type']} problem from worker {result['worker_id']}")
+                    result_queue.task_done()
+                except queue.Empty:
+                    break
+            
             # Update batch with final cost
-            batch.batch_cost = batch_cost
+            batch.batch_cost = stats['total_cost']
             batch.save(update_fields=['batch_cost'])
+            
+            print(f"\n🎉 Generation Complete!")
+            print(f"   Valid Problems: {stats['valid']}")
+            print(f"   Solved Problems: {stats['solved']}")
+            print(f"   Discarded Problems: {stats['discarded']}")
+            print(f"   Total Attempts: {stats['attempts']}")
+            print(f"   Total Cost: ${stats['total_cost']:.4f}")
+            print(f"   Success Rate: {(stats['valid'] / stats['attempts'] * 100):.1f}%" if stats['attempts'] > 0 else "N/A")
 
             return JsonResponse({
                 'status': 'success',
                 'batch_id': batch.id,
-                'message': f'Successfully generated batch with {valid_count} valid problems in {attempt_count} attempts',
-                'total_cost': batch_cost
+                'message': f'Successfully generated batch with {stats["valid"]} valid problems in {stats["attempts"]} attempts using {NUM_WORKERS} workers',
+                'total_cost': stats['total_cost'],
+                'stats': {
+                    'valid': stats['valid'],
+                    'solved': stats['solved'],
+                    'discarded': stats['discarded'],
+                    'attempts': stats['attempts'],
+                    'success_rate': round(stats['valid'] / stats['attempts'] * 100, 1) if stats['attempts'] > 0 else 0
+                }
             })
 
         except Exception as e:
-            print(f"\nError occurred: {str(e)}")
+            print(f"\n❌ Error occurred: {str(e)}")
             return JsonResponse({
                 'status': 'error',
                 'message': str(e)
