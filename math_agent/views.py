@@ -20,7 +20,7 @@ from .utils.similarity_utils import SIMILARITY_THRESHOLD
 
 # Create your views here.
 
-def problem_generation_worker(worker_id, task_queue, result_queue, pipeline, taxonomy_file, batch_id, stats_lock, stats):
+def problem_generation_worker(worker_id, task_queue, result_queue, pipeline, taxonomy_file, batch_id, stats_lock, stats, mcq_mode=False):
     """
     Worker function for generating problems in parallel.
     
@@ -59,8 +59,8 @@ def problem_generation_worker(worker_id, task_queue, result_queue, pipeline, tax
                 }
                 
                 # Generate problem
-                print(f"[Worker {worker_id}] Calling generator for {subject} - {topic}...")
-                question, answer, hints, embedding, similar_problems, generator_cost = generate_problem(pipeline['generator'], taxonomy=taxonomy)
+                print(f"[Worker {worker_id}] Calling generator for {subject} - {topic}... (MCQ: {mcq_mode})")
+                question, answer, hints, embedding, similar_problems, generator_cost = generate_problem(pipeline['generator'], taxonomy=taxonomy, mcq_mode=mcq_mode)
                 problem_cost += generator_cost
                 print(f"[Worker {worker_id}] Generator result:\nQuestion: {question}\nAnswer: {answer}\nCost: ${generator_cost}")
                 
@@ -121,13 +121,13 @@ def problem_generation_worker(worker_id, task_queue, result_queue, pipeline, tax
 
                     # Test with target
                     print(f"[Worker {worker_id}] Calling target...")
-                    target_result, target_cost = test_with_target(question, pipeline['target'])
+                    target_result, target_cost = test_with_target(question, pipeline['target'], mcq_mode)
                     problem_cost += target_cost
                     print(f"[Worker {worker_id}] Target result:\n{target_result}\nCost: ${target_cost}")
                     
                     # Judge the solution
                     print(f"[Worker {worker_id}] Calling judge...")
-                    is_solved, judge_cost = judge_solution(target_result, answer, pipeline['judge'])
+                    is_solved, judge_cost = judge_solution(target_result, answer, pipeline['judge'], mcq_mode, question)
                     problem_cost += judge_cost
                     print(f"[Worker {worker_id}] Judge result: {'Solved' if is_solved else 'Not Solved'}\nCost: ${judge_cost}")
                     
@@ -212,6 +212,7 @@ class GenerateView(View):
             number_of_valid_needed = int(request.POST.get('number_of_valid_needed'))
             pipeline = json.loads(request.POST.get('pipeline'))
             taxonomy_file = json.loads(request.FILES.get('taxonomy_file').read().decode('utf-8'))
+            mcq_mode = request.POST.get('mcq_mode') == 'true'
 
             # Create new batch
             batch = Batch.objects.create(
@@ -223,6 +224,7 @@ class GenerateView(View):
 
             print(f"\n🚀 Starting threaded problem generation with 10 workers")
             print(f"Target: {number_of_valid_needed} valid problems")
+            print(f"MCQ Mode: {'Enabled' if mcq_mode else 'Disabled'}")
             print("=" * 60)
 
             # Threading setup
@@ -247,7 +249,7 @@ class GenerateView(View):
             for i in range(NUM_WORKERS):
                 worker = threading.Thread(
                     target=problem_generation_worker,
-                    args=(i + 1, task_queue, result_queue, pipeline, taxonomy_file, batch.id, stats_lock, stats),
+                    args=(i + 1, task_queue, result_queue, pipeline, taxonomy_file, batch.id, stats_lock, stats, mcq_mode),
                     daemon=True
                 )
                 worker.start()
@@ -301,7 +303,7 @@ class GenerateView(View):
                         last_status_time = current_time
                     
                     # Safety check - prevent infinite loop
-                    if stats['attempts'] > number_of_valid_needed * 10:  # 10x safety factor
+                    if stats['attempts'] > number_of_valid_needed * 25:  # 25x safety factor
                         print(f"⚠️  Safety limit reached ({stats['attempts']} attempts). Stopping generation.")
                         break
                         

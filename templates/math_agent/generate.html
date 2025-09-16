@@ -41,6 +41,15 @@
 
             <div class="mb-3">
                 <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="mcqMode" name="mcq_mode">
+                    <label class="form-check-label" for="mcqMode">
+                        Generate MCQ (Multiple Choice Questions)
+                    </label>
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <div class="form-check">
                     <input class="form-check-input" type="checkbox" id="configurePipeline" name="configure_pipeline">
                     <label class="form-check-label" for="configurePipeline">
                         Configure Pipeline (Optional)
@@ -219,6 +228,9 @@ document.getElementById('generateForm').addEventListener('submit', function(e) {
         }
     };
     
+    // Add MCQ mode flag
+    const mcqMode = document.getElementById('mcqMode').checked;
+    formData.append('mcq_mode', mcqMode);
     formData.append('pipeline', JSON.stringify(pipeline));
     
     fetch('{% url "math_agent:generate" %}', {

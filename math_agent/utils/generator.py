@@ -1,10 +1,10 @@
 import json
 from django.conf import settings
-from .system_messages import GENERATOR_MESSAGE
+from .system_messages import GENERATOR_MESSAGE, GENERATOR_MCQ_MESSAGE
 from .call_llm_clients import call_llm
 from .similarity_utils import find_similar_problems
 
-def generate_problem(pipeline_config, taxonomy=None):
+def generate_problem(pipeline_config, taxonomy=None, mcq_mode=False):
     """
     Generate a math problem using the specified model.
     
@@ -24,8 +24,11 @@ def generate_problem(pipeline_config, taxonomy=None):
             topic = taxonomy.get('topic', '')
             user_prompt = f"Generate a math problem in {subject} under the topic '{topic}'."
         
+        # Choose system message based on MCQ mode
+        system_message = GENERATOR_MCQ_MESSAGE if mcq_mode else GENERATOR_MESSAGE
+        
         messages = [
-            {"role": "system", "content": GENERATOR_MESSAGE},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": user_prompt}
         ]
         

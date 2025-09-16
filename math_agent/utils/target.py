@@ -1,9 +1,9 @@
 import json
 from django.conf import settings
-from .system_messages import TARGET_MESSAGE
+from .system_messages import TARGET_MESSAGE, TARGET_MCQ_MESSAGE
 from .call_llm_clients import call_llm
 
-def test_with_target(question, pipeline_config):
+def test_with_target(question, pipeline_config, mcq_mode=False):
     """
     Test a math problem with the target model.
     
@@ -21,8 +21,11 @@ def test_with_target(question, pipeline_config):
             "problem": question
         }
         
+        # Choose system message based on MCQ mode
+        system_message = TARGET_MCQ_MESSAGE if mcq_mode else TARGET_MESSAGE
+        
         messages = [
-            {"role": "system", "content": TARGET_MESSAGE},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": json.dumps(input_data)}
         ]
         
